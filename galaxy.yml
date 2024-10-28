@@ -17,7 +17,7 @@ license:
   - "Apache-2.0"
 
 tags:
-  - template
-  - config
+  - linux
+  - tools
 
 repository: "https://github.com/sardinasystems/ansible-collections-fishos-config"

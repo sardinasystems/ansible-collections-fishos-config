@@ -69,6 +69,7 @@ bump2version = "*"
 types-PyYAML = "*"
 ansible-lint-junit = "*"
 yamllint-junit = "*"
+antsibull-changelog = "*"
 
 [tool.poetry.group.docs.dependencies]
 mkdocs = "*"
