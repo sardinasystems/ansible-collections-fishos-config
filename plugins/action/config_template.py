@@ -1,4 +1,5 @@
 # (c) 2015, Kevin Carter <kevin.carter@rackspace.com>
+# (c) 2023, Vladimir Ermakov <vermakov@sardinasystems.com>
 #
 # This file is part of Ansible
 #
@@ -14,1010 +15,588 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
-
-try:
-    import ConfigParser
-except ImportError:
-    import configparser as ConfigParser
-import datetime
-
-try:
-    from StringIO import StringIO
-except ImportError:
-    from io import StringIO
+#
+# NOTE(vermakov): this is slightly modified version of the plugin.
+# Changes:
+# 1. Dropped support for Python 2 and Ansible 2.9. We're running on 2.14+
+# 2. Changed Diff back to unified file diff
+# 3. Changed to use iniparser instead of usage of outdated RawConfigParser
 
 import base64
+import dataclasses
 import json
 import os
-import pwd
 import re
-import time
-import yaml
-import tempfile as tmpfilelib
+import shutil
+import tempfile
+import typing
+from io import StringIO
 
-from collections import OrderedDict
-
-from ansible.plugins.action import ActionBase
+import tomlkit
+from ansible import constants as C
+from ansible.config.manager import ensure_type
+from ansible.errors import AnsibleAction, AnsibleActionFail, AnsibleError
 from ansible.module_utils._text import to_bytes, to_text
 from ansible.module_utils.parsing.convert_bool import boolean
-from ansible import constants as C
-from ansible import errors
-from ansible.parsing.yaml.dumper import AnsibleDumper
-from distutils.version import LooseVersion
-from ansible import __version__ as __ansible_version__
-
-__metaclass__ = type
-
-CONFIG_TYPES = {
-    'ini': 'return_config_overrides_ini',
-    'json': 'return_config_overrides_json',
-    'yaml': 'return_config_overrides_yaml'
-}
-
-STRIP_MARKER = '__MARKER__'
-
-# Py3 vs Py2 error handling. When Py2 is no longer supported, remove this.
-try:
-    PermissionError = PermissionError
-except NameError:
-    PermissionError = (IOError, OSError)
-try:
-    FileNotFoundError = FileNotFoundError
-except NameError:
-    FileNotFoundError = OSError
-
-if yaml.SafeDumper not in AnsibleDumper.__bases__:
-    AnsibleDumper.__bases__ = (yaml.SafeDumper,) + AnsibleDumper.__bases__
+from ansible.module_utils.six import string_types
+from ansible.plugins.action import ActionBase
+from ansible.template import AnsibleEnvironment, generate_ansible_template_vars
+from iniparse import ini
+from iniparse.utils import tidy as ini_tidy
+from ruamel.yaml import YAML
 
 
-class IDumper(AnsibleDumper):
-    def increase_indent(self, flow=False, indentless=False):
-        return super(IDumper, self).increase_indent(flow, False)
+class OptionLine(ini.OptionLine):
+    indent = ""
+
+    regex = re.compile(
+        r"^(?P<indent>[\s]*)"
+        r"(?P<name>[^:=\s[][^:=]*)"
+        r"(?P<sep>[:=]\s*)"
+        r"(?P<value>.*)$"
+    )
+
+    indent_regex = re.compile(r"^(?P<indent>[\s]*)")
+
+    def to_string(self) -> str:
+        return self.indent + super().to_string()
+
+    @classmethod
+    def parse(cls, line: str) -> typing.Optional["OptionLine"]:
+        instance = super().parse(line)
+        if instance is not None:
+            m = cls.indent_regex.match(line)
+            if m:
+                instance.indent = m.group("indent")
+
+        return instance
 
 
-class MultiKeyDict(OrderedDict):
-    """Dictionary class which supports duplicate keys.
-    This class allows for an item to be added into a standard python dictionary
-    however if a key is created more than once the dictionary will convert the
-    singular value to a python tuple. This tuple type forces all values to be a
-    string.
-    Example Usage:
-    >>> z = MultiKeyDict()
-    >>> z['a'] = 1
-    >>> z['b'] = ['a', 'b', 'c']
-    >>> z['c'] = {'a': 1}
-    >>> print(z)
-    ... {'a': 1, 'b': ['a', 'b', 'c'], 'c': {'a': 1}}
-    >>> z['a'] = 2
-    >>> print(z)
-    ... {'a': tuple(['1', '2']), 'c': {'a': 1}, 'b': ['a', 'b', 'c']}
-    """
+class INIConfig(ini.INIConfig):
+    _line_types = [
+        ini.EmptyLine,
+        ini.CommentLine,
+        ini.SectionLine,
+        OptionLine,
+        ini.ContinuationLine,
+    ]
+    _injected_default_section: bool = False
 
-    def index(self, key):
-        index_search = [
-            i for i, item in enumerate(self) if item.startswith(key)
-        ]
-        if len(index_search) > 1:
-            raise SystemError('Index search returned more than one value')
-        return index_search[0]
+    @classmethod
+    def from_string(
+        cls, resultant: str, source: str = "<???>", **kwargs
+    ) -> "INIConfig":
+        if resultant.endswith("\n"):
+            resultant = resultant[0:-1]
 
-    def insert(self, index, key, value):
-        list(self)[index]  # Validates the index
-        shadow = MultiKeyDict()
-        counter = 0
-        for k, v in self.items():
-            if counter == index:
-                shadow[k] = v
-                shadow[key] = value
+        ini.DEFAULTSECT = "@@disable_default_section_special_handling"
+        ini.change_comment_syntax(";#", allow_rem=False)
+
+        buf = StringIO(resultant)
+        buf.name = source
+
+        try:
+            instance = cls(buf, optionxformvalue=str, **kwargs)
+        except ini.MissingSectionHeaderError:
+            # Fallback for .env like files used by systemd
+            buf.seek(0)
+            buf.write("[DEFAULT]\n")
+            buf.write(resultant)
+            buf.seek(0)
+
+            instance = cls(buf, optionxformvalue=str, **kwargs)
+            instance._injected_default_section = True
+
+        return instance
+
+    def to_string(self) -> str:
+        resultant = str(self)
+        if self._injected_default_section:
+            resultant = "\n".join(resultant.splitlines()[1:])
+
+        if not resultant.endswith("\n"):
+            resultant += "\n"
+
+        return resultant
+
+    def merge_repeated_options(self):
+        for section_name in list(self):
+            section = self[section_name]
+            for container in section._lines:
+                if not isinstance(container, ini.LineContainer):
+                    continue
+
+                to_drop: typing.List[int] = []
+                for idx, line in enumerate(container.contents):
+                    if not isinstance(line, ini.LineContainer):
+                        continue
+
+                    opt = section._options[line.get_name()]
+                    if line is not opt:
+                        to_drop.append(idx)
+                        opt.extend(line.contents)
+                        opt.contents.sort(key=lambda x: x.line_number)
+
+                for idx in sorted(to_drop, reverse=True):
+                    del container.contents[idx]
+
+    def tidy(self):
+        ini_tidy(self)
+
+    def as_dict(self) -> typing.Dict[str, dict]:
+        def yield_section(sect):
+            for name in sect:
+                v = sect[name]
+                if isinstance(v, string_types) and "\n" in v:
+                    yield name, v.splitlines()
+                    continue
+                yield name, v
+
+        return {section: dict(yield_section(self[section])) for section in self}
+
+    def set_option(
+        self,
+        section: str,
+        key: str,
+        value: typing.Any,
+        args: "TaskArgs" = None,
+    ):
+        if args is None:
+            args = TaskArgs()
+
+        if isinstance(value, list):
+            value = args.ini_list_sep.join(to_text(item) for item in value)
+        elif isinstance(value, dict):
+            value = json.dumps(value, sort_keys=True)
+
+        xkey = key.strip()
+        ind_idx = key.index(xkey)
+        if ind_idx > 0:
+            indent = key[0:ind_idx]
+
+            if section not in self:
+                self._new_namespace(section)
+
+            sec = self[section]
+            if xkey in sec:
+                sec[xkey] = value  # keep indentation
             else:
-                shadow[k] = v
-            counter += 1
+                # See ini.INISection.__setitem__
+                ol = OptionLine(xkey, value)
+                ol.indent = indent
+                obj = ini.LineContainer(ol)
+                sec._lines[-1].add(obj)
+                sec._options[xkey] = obj
+
         else:
-            return shadow
-
-    def update(self, E=None, **kwargs):
-        for key, value in E.items():
-            super(MultiKeyDict, self).__setitem__(key, value)
-
-    def __setitem__(self, key, value):
-        if key in self:
-            if isinstance(self[key], tuple):
-                items = self[key]
-                if str(value) not in items:
-                    items += tuple([str(value)])
-                    super(MultiKeyDict, self).__setitem__(key, items)
-            elif isinstance(self[key], MultiKeyDict):
-                pass
-            else:
-                if str(self[key]) != str(value):
-                    items = tuple([str(self[key]), str(value)])
-                    super(MultiKeyDict, self).__setitem__(key, items)
-        else:
-            return super(MultiKeyDict, self).__setitem__(key, value)
+            self[section][key] = value
 
 
-class ConfigTemplateParser(ConfigParser.RawConfigParser):
-    """ConfigParser which supports multi key value.
-    The parser will use keys with multiple variables in a set as a multiple
-    key value within a configuration file.
-    Default Configuration file:
-    [DEFAULT]
-    things =
-        url1
-        url2
-        url3
-    other = 1,2,3
-    [section1]
-    key = var1
-    key = var2
-    key = var3
-    Example Usage:
-    >>> cp = ConfigTemplateParser(dict_type=MultiKeyDict)
-    >>> cp.read('/tmp/test.ini')
-    ... ['/tmp/test.ini']
-    >>> cp.get('DEFAULT', 'things')
-    ... \nurl1\nurl2\nurl3
-    >>> cp.get('DEFAULT', 'other')
-    ... '1,2,3'
-    >>> cp.set('DEFAULT', 'key1', 'var1')
-    >>> cp.get('DEFAULT', 'key1')
-    ... 'var1'
-    >>> cp.get('section1', 'key')
-    ... {'var1', 'var2', 'var3'}
-    >>> cp.set('section1', 'key', 'var4')
-    >>> cp.get('section1', 'key')
-    ... {'var1', 'var2', 'var3', 'var4'}
-    >>> with open('/tmp/test2.ini', 'w') as f:
-    ...     cp.write(f)
-    Output file:
-    [DEFAULT]
-    things =
-        url1
-        url2
-        url3
-    key1 = var1
-    other = 1,2,3
-    [section1]
-    key = var4
-    key = var1
-    key = var3
-    key = var2
-    """
+@dataclasses.dataclass
+class TaskArgs:
+    source: str = None  # src or temp file
+    dest: str = None  # remote path
+    src: str = None  # local template file
+    remote_src: bool = False  # use remote file as source
+    content: typing.Any = None  # content, will be placed to temp file
+    config_overrides: dict = dataclasses.field(default_factory=dict)  # overrides
+    config_type: str = "ini"
+    searchpath: list = dataclasses.field(default_factory=list)
+    list_extend: bool = False
+    ignore_none_type: bool = False
+    default_section: str = "DEFAULT"
+    ini_list_sep: str = ","
+    ini_tidy: bool = True
+    json_indent: int = 4
+    yml_multilines: bool = False  # maybe unsupported
+    yaml_indent_mapping: int = 2
+    yaml_indent_sequence: int = 4
+    yaml_indent_offset: int = 2
+    strip_comments: bool = False
+    block_start_string: str = None
+    block_end_string: str = None
+    variable_start_string: str = None
+    variable_end_string: str = None
+    comment_start_string: str = None
+    comment_end_string: str = None
+    render_template: bool = True
+    state: str = None  # should not be set
 
-    def __init__(self, *args, **kwargs):
-        self.ignore_none_type = bool(kwargs.pop('ignore_none_type', True))
-        self.default_section = str(kwargs.pop('default_section', 'DEFAULT'))
-        self.yml_multilines = bool(kwargs.pop('yml_multilines', False))
-        self._comment_prefixes = kwargs.pop('comment_prefixes', '/')
-        self._empty_lines_in_values = kwargs.get('allow_no_value', True)
-        self._strict = kwargs.get('strict', False)
-        self._allow_no_value = self._empty_lines_in_values
-        ConfigParser.RawConfigParser.__init__(self, *args, **kwargs)
+    @classmethod
+    def from_args(cls, task_args: dict) -> "TaskArgs":
+        def yiled_args() -> (str, typing.Any):
+            for field in dataclasses.fields(cls):
+                v = task_args.get(field.name, field.default)
+                if isinstance(field.type, bool):
+                    yield field.name, boolean(v, strict=False)
+                elif isinstance(field.type, string_types) and v is not None:
+                    yield field.name, ensure_type(v, "string")
+                elif isinstance(field.type, int) and v is not None:
+                    yield field.name, ensure_type(v, "integer")
+                elif v is not None:
+                    yield field.name, v
 
-    def set(self, section, option, value=None):
-        if not section or section == 'DEFAULT':
-            sectdict = self._defaults
-            use_defaults = True
-        else:
-            try:
-                sectdict = self._sections[section]
-            except KeyError:
-                raise SystemError('Section %s not found' % section)
-            else:
-                use_defaults = False
-
-        option = self.optionxform(option)
-        if use_defaults:
-            try:
-                index = sectdict.index('#%s' % option)
-            except (ValueError, IndexError):
-                sectdict[option] = value
-            else:
-                self._defaults = sectdict.insert(index, option, value)
-        else:
-            sectdict[option] = value
-
-    def _write(self, fp, section, key, item, entry):
-        if section:
-            # If we are not ignoring a none type value, then print out
-            # the option name only if the value type is None.
-            if not self.ignore_none_type and item is None:
-                fp.write(key + '\n')
-                return
-
-        fp.write(entry)
-
-    def _write_check(self, fp, key, value, section=False):
-        def _return_entry(option, item):
-            # If we have item, we consider it as a config parameter with value
-            if item is not None:
-                return "%s = %s\n" % (option, str(item).replace('\n', '\n\t'))
-            elif not option:
-                return option
-            else:
-                return "%s\n" % option
-
-        key = key.split(STRIP_MARKER)[0]
-        if isinstance(value, (tuple, set)):
-            for i in sorted(value):
-                entry = _return_entry(option=key, item=i)
-                self._write(fp, section, key, i, entry)
-        elif isinstance(value, list):
-            _value = [str(i.replace('\n', '\n\t')) for i in value]
-            entry = '%s = %s\n' % (key, ','.join(_value))
-            self._write(fp, section, key, value, entry)
-        else:
-            entry = _return_entry(option=key, item=value)
-            self._write(fp, section, key, value, entry)
-
-    def write(self, fp, **kwargs):
-        def _do_write(section_name, section, section_bool=False):
-            fp.write("[%s]\n" % section_name)
-            for key, value in section.items():
-                self._write_check(
-                    fp,
-                    key=key,
-                    value=value,
-                    section=section_bool
-                )
-
-            fp.write("\n")
-
-        if self.default_section != 'DEFAULT':
-            if not self._sections.get(self.default_section, False):
-                _do_write(
-                    section_name=self.default_section,
-                    section=self._sections[self.default_section],
-                    section_bool=True
-                )
-        elif self._defaults:
-            _do_write('DEFAULT', self._defaults)
-
-        for i in self._sections:
-            _do_write(i, self._sections[i], section_bool=True)
-
-    def _read(self, fp, fpname):
-        def _temp_set():
-            _temp_item = [cursect[optname]]
-            cursect.update({optname: _temp_item})
-
-        optname = None
-        cursect = {}
-        marker_counter = 0
-        for lineno, line in enumerate(fp, start=0):
-            marker_counter += 1
-            mo_match = self.SECTCRE.match(line)
-            mo_optcre = self._optcre.match(line)
-            if mo_match:
-                sectname = mo_match.group('header')
-                if sectname in self._sections:
-                    cursect = self._sections[sectname]
-                elif sectname == 'DEFAULT':
-                    cursect = self._defaults
-                else:
-                    cursect = self._dict()
-                    self._sections[sectname] = cursect
-            elif mo_optcre:
-                optname, vi, optval = mo_optcre.group('option', 'vi', 'value')
-                optname = self.optionxform(optname.rstrip())
-                if optname and not optname.startswith('#') and optval:
-                    if vi in ('=', ':') and ';' in optval:
-                        pos = optval.find(';')
-                        if pos != -1 and optval[pos - 1].isspace():
-                            optval = optval[:pos]
-                    optval = optval.strip()
-                    if optval == '""':
-                        optval = ''
-                else:
-                    optname = '%s%s-%d' % (
-                        optname,
-                        STRIP_MARKER,
-                        marker_counter
-                    )
-                cursect[optname] = optval
-            else:
-                optname = '%s-%d' % (
-                    STRIP_MARKER,
-                    marker_counter
-                )
-                cursect[optname] = None
-
-
-class DictCompare(object):
-    """
-    Calculate the difference between two dictionaries.
-
-    Example Usage:
-    >>> base_dict = {'test1': 'val1', 'test2': 'val2', 'test3': 'val3'}
-    >>> new_dict = {'test1': 'val2', 'test3': 'val3', 'test4': 'val3'}
-    >>> dc = DictCompare(base_dict, new_dict)
-    >>> dc.added()
-    ... ['test4']
-    >>> dc.removed()
-    ... ['test2']
-    >>> dc.changed()
-    ... ['test1']
-    >>> dc.get_changes()
-    ... {'added':
-    ...     {'test4': 'val3'},
-    ...  'removed':
-    ...     {'test2': 'val2'},
-    ...  'changed':
-    ...     {'test1': {'current_val': 'vol1', 'new_val': 'val2'}
-    ... }
-    """
-
-    def __init__(self, base_dict, new_dict):
-        self.new_dict, self.base_dict = new_dict, base_dict
-        self.base_items, self.new_items = set(
-            self.base_dict.keys()), set(self.new_dict.keys())
-        self.intersect = self.new_items.intersection(self.base_items)
-
-    def added(self):
-        return self.new_items - self.intersect
-
-    def removed(self):
-        return self.base_items - self.intersect
-
-    def changed(self):
-        return set(
-            x for x in self.intersect if self.base_dict[x] != self.new_dict[x])
-
-    def get_changes(self):
-        """Returns dict of differences between 2 dicts and bool indicating if
-        there are differences
-
-        :param base_dict: ``dict``
-        :param new_dict: ``dict``
-        :returns: ``dict``, ``bool``
-        """
-        changed = False
-        mods = {'added': {}, 'removed': {}, 'changed': {}}
-
-        for s in self.changed():
-            changed = True
-            if type(self.base_dict[s]) is not dict:
-                mods['changed'] = {
-                    s: {'current_val': self.base_dict[s],
-                        'new_val': self.new_dict[s]}}
-                continue
-
-            diff = DictCompare(self.base_dict[s], self.new_dict[s])
-            for a in diff.added():
-                if s not in mods['added']:
-                    mods['added'][s] = {a: self.new_dict[s][a]}
-                else:
-                    mods['added'][s][a] = self.new_dict[s][a]
-
-            for r in diff.removed():
-                if s not in mods['removed']:
-                    mods['removed'][s] = {r: self.base_dict[s][r]}
-                else:
-                    mods['removed'][s][r] = self.base_dict[s][r]
-
-            for c in diff.changed():
-                if s not in mods['changed']:
-                    mods['changed'][s] = {
-                        c: {'current_val': self.base_dict[s][c],
-                            'new_val': self.new_dict[s][c]}}
-                else:
-                    mods['changed'][s][c] = {
-                        'current_val': self.base_dict[s][c],
-                        'new_val': self.new_dict[s][c]}
-
-        for s in self.added():
-            changed = True
-            mods['added'][s] = self.new_dict[s]
-
-        for s in self.removed():
-            changed = True
-            mods['removed'][s] = self.base_dict[s]
-
-        return mods, changed
+        return cls(**dict(yiled_args()))
 
 
 class ActionModule(ActionBase):
     TRANSFERS_FILES = True
 
-    def return_config_overrides_ini(self,
-                                    config_overrides,
-                                    resultant,
-                                    list_extend=True,
-                                    ignore_none_type=True,
-                                    default_section='DEFAULT',
-                                    yml_multilines=False):
-        """Returns string value from a modified config file and dict of
-        merged config
+    def type_merger(self, resultant: str, args: TaskArgs) -> (str, dict):
+        if args.config_type == "ini":
+            return self.return_config_overrides_ini(resultant, args)
+        elif args.config_type == "json":
+            return self.return_config_overrides_json(resultant, args)
+        elif args.config_type == "yaml":
+            return self.return_config_overrides_yaml(resultant, args)
+        elif args.config_type == "toml":
+            return self.return_config_overrides_toml(resultant, args)
+        else:
+            raise ValueError("Unsupported config_type")
 
-        :param config_overrides: ``dict``
-        :param resultant: ``str`` || ``unicode``
-        :returns: ``str``, ``dict``
-        """
-        def _add_section(section_name):
-            # Attempt to add a section to the config file passing if
-            #  an error is raised that is related to the section
-            #  already existing.
-            try:
-                config.add_section(section_name)
-            except (ConfigParser.DuplicateSectionError, ValueError):
-                pass
+    def return_config_overrides_ini(
+        self, resultant: str, args: TaskArgs
+    ) -> (str, dict):
+        """Returns string value from a modified config file and dict of merged config"""
+        config = INIConfig.from_string(resultant, args.source)
+        config.merge_repeated_options()
 
-        # If there is an exception loading the RawConfigParser The config obj
-        #  is loaded again without the extra option. This is being done to
-        #  support older python.
-        try:
-            config = ConfigTemplateParser(
-                allow_no_value=True,
-                dict_type=MultiKeyDict,
-                ignore_none_type=ignore_none_type,
-                default_section=default_section,
-                yml_multilines=yml_multilines,
-                comment_prefixes='/'
-            )
-            config.optionxform = str
-        except Exception:
-            config = ConfigTemplateParser(
-                allow_no_value=True,
-                dict_type=MultiKeyDict,
-                comment_prefixes='/'
-            )
-
-        config_object = StringIO(resultant)
-        try:
-            config.read_file(config_object)
-        except AttributeError:
-            config.readfp(config_object)
-
-        if default_section != 'DEFAULT':
-            _add_section(section_name=default_section)
-
-        for section, items in config_overrides.items():
+        for section, items in args.config_overrides.items():
             # If the items value is not a dictionary it is assumed that the
             #  value is a default item for this config type.
             if not isinstance(items, dict):
-                if isinstance(items, list):
-                    items = ','.join(to_text(i) for i in items)
-
-                self._option_write(
-                    config,
-                    default_section,
-                    section,
-                    items
-                )
+                config.set_option(args.default_section, section, items, args)
             else:
-                _add_section(section_name=section)
                 for key, value in items.items():
-                    try:
-                        self._option_write(config, section, key, value)
-                    except ConfigParser.NoSectionError as exp:
-                        error_msg = str(exp)
-                        error_msg += (
-                            ' Try being more explicit with your override'
-                            'data. Sections are case sensitive.'
-                        )
-                        raise errors.AnsibleModuleError(error_msg)
+                    config.set_option(section, key, value, args)
 
-        config_object.close()
+        if args.ini_tidy:
+            config.tidy()
 
-        config_dict_new = OrderedDict()
-        config_defaults = config.defaults()
-        for s in config.sections():
-            config_dict_new[s] = OrderedDict()
-            for k, v in config.items(s):
-                if k not in config_defaults or config_defaults[k] != v:
-                    config_dict_new[s][k] = v
-                else:
-                    if default_section in config_dict_new:
-                        config_dict_new[default_section][k] = v
-                    else:
-                        config_dict_new[default_section] = {k: v}
+        return config.to_string(), config.as_dict()
 
-        resultant_stringio = StringIO()
-        try:
-            config.write(resultant_stringio)
-            return resultant_stringio.getvalue(), config_dict_new
-        finally:
-            resultant_stringio.close()
-
-    @staticmethod
-    def _option_write(config, section, key, value):
-        config.remove_option(str(section), str(key))
-        try:
-            if not any(list(value.values())):
-                value = tuple(value.keys())
-        except AttributeError:
-            pass
-        if isinstance(value, (tuple, set)):
-            config.set(str(section), str(key), value)
-        elif isinstance(value, set):
-            config.set(str(section), str(key), value)
-        elif isinstance(value, list):
-            config.set(str(section), str(key), ','.join(str(i) for i in value))
-        else:
-            config.set(str(section), str(key), str(value))
-
-    def return_config_overrides_json(self,
-                                     config_overrides,
-                                     resultant,
-                                     list_extend=True,
-                                     ignore_none_type=True,
-                                     default_section='DEFAULT',
-                                     yml_multilines=False):
+    def return_config_overrides_json(
+        self, resultant: str, args: TaskArgs
+    ) -> (str, dict):
         """Returns config json and dict of merged config
 
         Its important to note that file ordering will not be preserved as the
         information within the json file will be sorted by keys.
-
-        :param config_overrides: ``dict``
-        :param resultant: ``str`` || ``unicode``
-        :returns: ``str``, ``dict``
         """
         original_resultant = json.loads(resultant)
         merged_resultant = self._merge_dict(
             base_items=original_resultant,
-            new_items=config_overrides,
-            list_extend=list_extend,
-            yml_multilines=yml_multilines
+            new_items=args.config_overrides,
+            list_extend=args.list_extend,
         )
-        return json.dumps(
+        indent = args.json_indent
+        if indent < 0:
+            indent = None
+        return (
+            json.dumps(
+                merged_resultant,
+                indent=indent,
+                sort_keys=True,
+            ),
             merged_resultant,
-            indent=4,
-            sort_keys=True
-        ), merged_resultant
+        )
 
-    def return_config_overrides_yaml(self,
-                                     config_overrides,
-                                     resultant,
-                                     list_extend=True,
-                                     ignore_none_type=True,
-                                     default_section='DEFAULT',
-                                     yml_multilines=False):
-        """Return config yaml and dict of merged config
+    def return_config_overrides_yaml(
+        self, resultant: str, args: TaskArgs
+    ) -> (str, dict):
+        """Return config yaml and dict of merged config"""
+        yaml = YAML(typ=args.strip_comments and "safe" or "rt")  # type: ignore
+        yaml.default_flow_style = False
+        yaml.indent(
+            mapping=args.yaml_indent_mapping,
+            sequence=args.yaml_indent_sequence,
+            offset=args.yaml_indent_offset,
+        )
 
-        :param config_overrides: ``dict``
-        :param resultant: ``str`` || ``unicode``
-        :returns: ``str``, ``dict``
-        """
-        original_resultant = yaml.safe_load(resultant)
+        if not args.strip_comments:
+            # NOTE(vermakov): see bigbang pwgen:
+            # hide document start to preserve comments before it
+            resultant, sep_count = re.subn(
+                r"^---$",
+                "#marker:---",
+                resultant,
+                flags=re.MULTILINE,
+            )
+            assert sep_count in [
+                0,
+                1,
+            ], "More than one YAML document separator is not supported!"
+
+        original_resultant = yaml.load(StringIO(resultant)) or {}
         merged_resultant = self._merge_dict(
             base_items=original_resultant,
-            new_items=config_overrides,
-            list_extend=list_extend,
-            yml_multilines=yml_multilines
+            new_items=args.config_overrides,
+            list_extend=args.list_extend,
+            yml_multilines=args.yml_multilines,
         )
-        return yaml.dump(
+
+        out = StringIO()
+        yaml.dump(merged_resultant, out)
+        resultant = out.getvalue()
+        if not args.strip_comments:
+            # restore document start marker
+            resultant = re.sub(
+                r"^#marker:---$",
+                "---",
+                resultant,
+                flags=re.MULTILINE,
+            )
+
+        return (
+            resultant,
             merged_resultant,
-            Dumper=IDumper,
-            default_flow_style=False,
-            width=1000,
-        ), merged_resultant
+        )
 
-    def _merge_dict(self,
-                    base_items,
-                    new_items,
-                    list_extend=True,
-                    yml_multilines=False):
-        """Recursively merge new_items into base_items.
+    def return_config_overrides_toml(
+        self, resultant: str, args: TaskArgs
+    ) -> (str, dict):
+        """Returns config toml and dict of merged config"""
+        original_resultant = tomlkit.loads(resultant)
+        merged_resultant = self._merge_dict(
+            base_items=original_resultant,
+            new_items=args.config_overrides,
+            list_extend=args.list_extend,
+        )
+        return (
+            tomlkit.dumps(
+                merged_resultant,
+            ),
+            merged_resultant,
+        )
 
-        :param base_items: ``dict``
-        :param new_items: ``dict`` || ``list``
-        :returns: ``dict``
-        """
+    def _merge_dict(
+        self,
+        base_items: typing.Union[dict, list],
+        new_items: typing.Union[dict, list],
+        list_extend: bool = True,
+        yml_multilines: bool = False,
+    ) -> dict:
+        """Recursively merge new_items into base_items."""
         if isinstance(new_items, dict):
             for key, value in new_items.items():
                 if isinstance(value, dict):
                     base_items[key] = self._merge_dict(
                         base_items=base_items.get(key, {}),
                         new_items=value,
-                        list_extend=list_extend
+                        list_extend=list_extend,
                     )
-                elif (not isinstance(value, int) and (
-                      ',' in value or (
-                        '\n' in value and not yml_multilines))):
-                    base_items[key] = re.split(',|\n', value)
-                    base_items[key] = [
-                        i.strip() for i in base_items[key] if i
-                    ]
+                elif not isinstance(value, int) and (
+                    "," in value or ("\n" in value and not yml_multilines)
+                ):
+                    base_items[key] = re.split(",|\n", value)
+                    base_items[key] = [i.strip() for i in base_items[key] if i]
                 elif isinstance(value, list):
                     if isinstance(base_items.get(key), list) and list_extend:
                         base_items[key].extend(value)
                     else:
                         base_items[key] = value
                 elif isinstance(value, (tuple, set)):
-                    le = list_extend  # assigned for pep8
-                    if isinstance(base_items.get(key), tuple) and le:
+                    if isinstance(base_items.get(key), tuple) and list_extend:
                         base_items[key] += tuple(value)
-                    elif isinstance(base_items.get(key), list) and le:
+                    elif isinstance(base_items.get(key), list) and list_extend:
                         base_items[key].extend(list(value))
                     else:
                         base_items[key] = value
                 else:
                     base_items[key] = new_items[key]
+
         elif isinstance(new_items, list):
             if list_extend:
                 base_items.extend(new_items)
             else:
                 base_items = new_items
+
         return base_items
 
-    def _load_options_and_status(self, task_vars):
+    def _load_task_args(self, task_vars: dict) -> TaskArgs:
         """Return options and status from module load."""
 
-        config_type = self._task.args.get('config_type')
-        if config_type not in ['ini', 'yaml', 'json']:
-            return False, dict(
-                failed=True,
-                msg="No valid [ config_type ] was provided. Valid options are"
-                    " ini, yaml, or json."
+        args = TaskArgs.from_args(self._task.args)
+        if args.config_type not in ["ini", "yaml", "json", "toml"]:
+            raise AnsibleActionFail(
+                "No valid [ config_type ] was provided. Valid options are"
+                " ini, yaml, json or toml.",
             )
 
-        # Access to protected method is unavoidable in Ansible
-        searchpath = [self._loader._basedir]
+        if args.state is not None:
+            raise AnsibleActionFail("template module do not support [ state ]")
 
-        if self._task._role:
-            file_path = self._task._role._role_path
-            searchpath.insert(1, C.DEFAULT_ROLES_PATH)
-            searchpath.insert(1, self._task._role._role_path)
-        else:
-            file_path = self._loader.get_basedir()
+        if args.remote_src:
+            if not args.src:
+                raise AnsibleActionFail("No user [ src ] was provided")
 
-        user_source = self._task.args.get('src')
-        remote_src = boolean(
-            self._task.args.get('remote_src', False),
-            strict=False
-        )
-        if remote_src:
             slurpee = self._execute_module(
-                module_name='slurp',
-                module_args=dict(src=user_source),
-                task_vars=task_vars
+                module_name="ansible.legacy.slurp",
+                module_args=dict(src=args.src),
+                task_vars=task_vars,
             )
-            _content = base64.b64decode(slurpee['content'])
-            _user_content = _content.decode('utf-8')
-        else:
-            # (alextricity25) It's possible that the user could pass in a
-            # datatype and not always a string. In this case we don't want
-            # the datatype python representation to be printed out to the
-            # file, but rather we want the serialized version.
-            _user_content = self._task.args.get('content')
+            _content = base64.b64decode(slurpee["content"])
+            args.content = to_text(_content)
 
-            # If the data type of the content input is a dictionary, it's
-            # converted dumped as json if config_type is 'json'.
-            if isinstance(_user_content, dict):
-                if self._task.args.get('config_type') == 'json':
-                    _user_content = json.dumps(_user_content)
+            fd, content_tempfile = tempfile.mkstemp(dir=C.DEFAULT_LOCAL_TMP)
+            f = os.fdopen(fd, "wb")
+            try:
+                f.write(to_bytes(args.content))
+            except Exception as ex:
+                os.remove(content_tempfile)
+                raise AnsibleActionFail("cannot save content to temp file") from ex
+            finally:
+                f.close()
 
-        user_content = str(_user_content)
-        if not user_source:
-            if not user_content:
-                return False, dict(
-                    failed=True,
-                    msg="No user [ src ] or [ content ] was provided"
-                )
-            else:
-                tmp_content = None
-                fd, tmp_content = tmpfilelib.mkstemp()
-                try:
-                    with open(tmp_content, 'wb') as f:
-                        f.write(user_content.encode())
-                except Exception as err:
-                    os.remove(tmp_content)
-                    raise Exception(err)
-                self._task.args['src'] = source = tmp_content
-        else:
-            source = self._loader.path_dwim_relative(
-                file_path,
-                'templates',
-                user_source
-            )
-        searchpath.insert(1, os.path.dirname(source))
+            args.src = content_tempfile
+            args.content = ""
 
-        _dest = self._task.args.get('dest')
-        list_extend = self._task.args.get('list_extend')
-        if not _dest:
-            return False, dict(
-                failed=True,
-                msg="No [ dest ] was provided"
-            )
-        else:
-            # Expand any user home dir specification
-            user_dest = self._remote_expand_user(_dest)
-            if user_dest.endswith(os.sep):
-                user_dest = os.path.join(user_dest, os.path.basename(source))
+        try:
+            args.source = self._find_needle("templates", args.src)
+        except AnsibleError as ex:
+            raise AnsibleActionFail("failed to find template file") from ex
 
-        # Get ignore_none_type
-        # In some situations(i.e. my.cnf files), INI files can have valueless
-        # options that don't have a '=' or ':' suffix. In these cases,
-        # ConfigParser gives these options a "None" value. If ignore_none_type
-        # is set to true, these key/value options will be ignored, if it's set
-        # to false, then ConfigTemplateParser will write out only the option
-        # name with out the '=' or ':' suffix. The default is true.
-        ignore_none_type = self._task.args.get('ignore_none_type', True)
+        searchpath = task_vars.get("ansible_search_path", [])
+        searchpath.extend([self._loader._basedir, os.path.dirname(args.source)])
 
-        default_section = self._task.args.get('default_section', 'DEFAULT')
-        remote_src = self._task.args.get('remote_src', False)
+        args.searchpath = []
+        for p in searchpath:
+            args.searchpath.append(os.path.join(p, "templates"))
+            args.searchpath.append(p)
 
-        yml_multilines = self._task.args.get('yml_multilines', False)
-        block_end_string = self._task.args.get('block_end_string', '%}')
-        block_start_string = self._task.args.get('block_start_string', '{%')
-        variable_end_string = self._task.args.get('variable_end_string', '}}')
-        variable_start_string = self._task.args.get('variable_start_string', '{{')
+        if not args.dest:
+            raise AnsibleActionFail("No [ dest ] was provided")
 
-        return True, dict(
-            source=source,
-            dest=user_dest,
-            config_overrides=self._task.args.get('config_overrides', {}),
-            config_type=config_type,
-            searchpath=searchpath,
-            list_extend=list_extend,
-            ignore_none_type=ignore_none_type,
-            default_section=default_section,
-            yml_multilines=yml_multilines,
-            remote_src=remote_src,
-            block_end_string=block_end_string,
-            block_start_string=block_start_string,
-            variable_end_string=variable_end_string,
-            variable_start_string=variable_start_string
-        )
+        # Expand any user home dir specification
+        user_dest = self._remote_expand_user(args.dest)
+        if user_dest.endswith(os.path.sep):
+            user_dest = os.path.join(user_dest, os.path.basename(args.source))
 
-    def resultant_ini_as_dict(self, resultant_dict, return_dict=None):
-        if not return_dict:
-            return_dict = {}
-
-        for key, value in resultant_dict.items():
-            if not value:
-                continue
-            key = key.split(STRIP_MARKER)[0]
-            if isinstance(value, (OrderedDict, MultiKeyDict, dict)):
-                return_dict[key] = self.resultant_ini_as_dict(value)
-            else:
-                return_dict[key] = value
-
-        return return_dict
-
-    def _check_templar(self, data, extra):
-        if boolean(self._task.args.get('render_template', True)):
-            templar = self._templar
-            with templar.set_temporary_context(
-                variable_start_string=extra['variable_start_string'],
-                variable_end_string=extra['variable_end_string'],
-                block_start_string=extra['block_start_string'],
-                block_end_string=extra['block_end_string'],
-                searchpath=extra['searchpath']
-            ):
-                return templar.template(
-                    data,
-                    preserve_trailing_newlines=True,
-                    escape_backslashes=False,
-                    convert_data=False
-                )
-        else:
-            return data
+        args.dest = user_dest
+        return args
 
     def run(self, tmp=None, task_vars=None):
         """Run the method"""
 
-        if not tmp:
-            try:
-                remote_user = self._get_remote_user()
-            except Exception:
-                remote_user = task_vars.get('ansible_user')
-                if not remote_user:
-                    remote_user = task_vars.get('ansible_ssh_user')
-                if not remote_user:
-                    remote_user = self._play_context.remote_user
-            try:
-                tmp = self._make_tmp_path(remote_user)
-            except TypeError:
-                tmp = self._make_tmp_path()
+        if task_vars is None:
+            task_vars = dict()
 
-        _status, _vars = self._load_options_and_status(task_vars=task_vars)
-        if not _status:
-            return _vars
+        result = super().run(tmp, task_vars)
+        del tmp  # tmp no longer has any effect
 
-        temp_vars = task_vars.copy()
-        template_host = temp_vars['template_host'] = os.uname()[1]
-        source = temp_vars['template_path'] = _vars['source']
+        args = self._load_task_args(task_vars=task_vars)
 
         try:
-            mtime = os.path.getmtime(source)
-            temp_vars['template_mtime'] = datetime.datetime.fromtimestamp(
-                mtime
-            )
-            try:
-                template_uid = temp_vars['template_uid'] = pwd.getpwuid(
-                    os.stat(source).st_uid
-                ).pw_name
-            except Exception:
-                template_uid = temp_vars['template_uid'] = os.stat(
-                    source
-                ).st_uid
-        except (PermissionError, FileNotFoundError):
-            local_task_vars = temp_vars.copy()
-            if not boolean(self._task.args.get('remote_src', False),
-                           strict=False):
-                local_task_vars['connection'] = 'local'
-            stat = self._execute_module(
-                module_name='stat',
-                module_args=dict(path=source),
-                task_vars=local_task_vars
-            )
-            mtime = stat['stat']['mtime']
-            temp_vars['template_mtime'] = datetime.datetime.fromtimestamp(
-                mtime
-            )
-            template_uid = stat['stat']['uid']
+            with open(args.source, "rb") as f:
+                try:
+                    template_data = to_text(f.read(), errors="surrogate_or_strict")
+                except UnicodeError as ex:
+                    raise AnsibleActionFail(
+                        "Template source files must be utf-8 encoded"
+                    ) from ex
 
-        managed_default = C.DEFAULT_MANAGED_STR
-        managed_str = managed_default.format(
-            host=template_host,
-            uid=template_uid,
-            file=to_bytes(source)
-        )
+            # add ansible template vars
+            temp_vars = task_vars.copy()
+            # NOTE in the case of ANSIBLE_DEBUG=1 task_vars is VarsWithSources(MutableMapping)
+            # so | operator cannot be used as it can be used only on dicts
+            # https://peps.python.org/pep-0584/#what-about-mapping-and-mutablemapping
+            temp_vars.update(
+                generate_ansible_template_vars(args.src, args.source, args.dest)
+            )
 
-        temp_vars['ansible_managed'] = time.strftime(
-            managed_str,
-            time.localtime(mtime)
-        )
-        temp_vars['template_fullpath'] = os.path.abspath(source)
-        temp_vars['template_run_date'] = datetime.datetime.now()
+            if args.render_template:
+                # force templar to use AnsibleEnvironment to prevent issues with native types
+                # https://github.com/ansible/ansible/issues/46169
+                templar = self._templar.copy_with_new_env(
+                    environment_class=AnsibleEnvironment,
+                    searchpath=args.searchpath,
+                    block_start_string=args.block_start_string,
+                    block_end_string=args.block_end_string,
+                    variable_start_string=args.variable_start_string,
+                    variable_end_string=args.variable_end_string,
+                    comment_start_string=args.comment_start_string,
+                    comment_end_string=args.comment_end_string,
+                    available_variables=temp_vars,
+                )
+                resultant = templar.do_template(
+                    template_data,
+                    preserve_trailing_newlines=True,
+                    escape_backslashes=False,
+                )
 
+            else:
+                resultant = template_data
+
+        except AnsibleAction:
+            raise
+        except Exception as ex:
+            raise AnsibleActionFail(to_text(ex)) from ex
+        finally:
+            if not args.src and args.source:
+                os.unlink(args.source)
+
+        resultant, config_base = self.type_merger(resultant, args)
+
+        if args.strip_comments and args.config_type == "ini":
+            lines = [
+                ln
+                for ln in resultant.splitlines()
+                if not (ln.startswith(("#", ";")) or ln.strip() == "")
+            ]
+
+            resultant = "# " + temp_vars["ansible_managed"]
+            for line in lines:
+                if line.startswith("["):
+                    resultant += "\n"
+                resultant += line + "\n"
+
+        new_task = self._task.copy()
+        for field in dataclasses.fields(args):
+            new_task.args.pop(field.name, None)
+
+        local_tempdir = tempfile.mkdtemp(dir=C.DEFAULT_LOCAL_TMP)
         try:
-            with open(source, 'r') as f:
-                template_data = to_text(f.read())
-        except (PermissionError, FileNotFoundError):
-            local_temp_vars = task_vars.copy()
-            if not boolean(self._task.args.get('remote_src', False),
-                           strict=False):
-                local_temp_vars['connection'] = 'local'
-            template_data_slurpee = self._execute_module(
-                module_name='slurp',
-                module_args=dict(src=source),
-                task_vars=local_temp_vars
-            )
-            template_data = base64.b64decode(
-                template_data_slurpee['content']
-            ).decode('utf-8')
-
-        if LooseVersion(__ansible_version__) < LooseVersion("2.9"):
-            self._templar.set_available_variables(temp_vars)
-        else:
-            self._templar.available_variables = temp_vars
-
-        if self._task.args.get('content'):
-            resultant = template_data
-        else:
-            resultant = self._check_templar(data=template_data, extra=_vars)
-
-        if LooseVersion(__ansible_version__) < LooseVersion("2.9"):
-            # Access to protected method is unavoidable in Ansible
-            self._templar.set_available_variables(
-                self._templar._available_variables
-            )
-
-        type_merger = getattr(self, CONFIG_TYPES.get(_vars['config_type']))
-        resultant, config_base = type_merger(
-            config_overrides=_vars['config_overrides'],
-            resultant=resultant,
-            list_extend=_vars.get('list_extend', True),
-            ignore_none_type=_vars.get('ignore_none_type', True),
-            default_section=_vars.get('default_section', 'DEFAULT'),
-            yml_multilines=_vars.get('yml_multilines', False)
-        )
-
-        changed = False
-        config_new = None
-        if self._play_context.diff:
-            slurpee = self._execute_module(
-                module_name='slurp',
-                module_args=dict(src=_vars['dest']),
-                task_vars=task_vars
-            )
-            if 'content' in slurpee:
-                dest_data = base64.b64decode(
-                    slurpee['content']).decode('utf-8')
-                resultant_dest = self._check_templar(data=dest_data, extra=_vars)
-                type_merger = getattr(self,
-                                      CONFIG_TYPES.get(_vars['config_type']))
-                _, config_new = type_merger(
-                    config_overrides={},
-                    resultant=resultant_dest,
-                    list_extend=_vars.get('list_extend', True),
-                    ignore_none_type=_vars.get('ignore_none_type', True),
-                    default_section=_vars.get('default_section', 'DEFAULT'),
-                    yml_multilines=_vars.get('yml_multilines', False)
+            result_file = os.path.join(local_tempdir, os.path.basename(args.source))
+            with open(result_file, "wb") as f:
+                f.write(
+                    to_bytes(resultant, encoding="utf-8", errors="surrogate_or_strict")
                 )
 
-            # Compare source+overrides with dest to look for changes and
-            # build diff
-            if isinstance(config_base, dict):
-                if not config_new:
-                    config_new = dict()
-                cmp_dicts = DictCompare(
-                    self.resultant_ini_as_dict(resultant_dict=config_new),
-                    self.resultant_ini_as_dict(resultant_dict=config_base)
+            new_task.args.update(
+                dict(
+                    src=result_file,
+                    dest=args.dest,
+                    follow=True,
                 )
-                mods, changed = cmp_dicts.get_changes()
-            elif isinstance(config_base, list):
-                if not config_new:
-                    config_new = list()
-                mods = {
-                    'added': [
-                        i for i in config_new
-                        if i not in config_base
-                    ],
-                    'removed': [
-                        i for i in config_base
-                        if i not in config_new
-                    ],
-                    'changed': [
-                        i for i in (config_base + config_new)
-                        if i not in config_base or i not in config_new
-                    ]
-                }
-                changed = len(mods['changed']) > 0
-
-        # run the copy module
-        new_module_args = self._task.args.copy()
-        # Access to protected method is unavoidable in Ansible
-        transferred_data = self._transfer_data(
-            self._connection._shell.join_path(tmp, 'source'),
-            resultant
-        )
-        if LooseVersion(__ansible_version__) < LooseVersion("2.6"):
-            new_module_args.update(
-                dict(
-                    src=transferred_data,
-                    dest=_vars['dest'],
-                    original_basename=os.path.basename(source),
-                    follow=True,
-                ),
-            )
-        else:
-            new_module_args.update(
-                dict(
-                    src=transferred_data,
-                    dest=_vars['dest'],
-                    _original_basename=os.path.basename(source),
-                    follow=True,
-                ),
             )
 
-        # Remove data types that are not available to the copy module
-        new_module_args.pop('config_overrides', None)
-        new_module_args.pop('config_type', None)
-        new_module_args.pop('list_extend', None)
-        new_module_args.pop('ignore_none_type', None)
-        new_module_args.pop('default_section', None)
-        new_module_args.pop('yml_multilines', None)
-        new_module_args.pop('block_end_string', None)
-        new_module_args.pop('block_start_string', None)
-        new_module_args.pop('variable_end_string', None)
-        new_module_args.pop('variable_start_string', None)
+            # call with ansible.legacy prefix to eliminate collisions with collections while still allowing local override
+            copy_action = self._shared_loader_obj.action_loader.get(
+                "ansible.legacy.copy",
+                task=new_task,
+                connection=self._connection,
+                play_context=self._play_context,
+                loader=self._loader,
+                templar=self._templar,
+                shared_loader_obj=self._shared_loader_obj,
+            )
+            result.update(copy_action.run(task_vars=task_vars))
 
-        # While this is in the copy module we dont want to use it.
-        new_module_args.pop('remote_src', None)
+        finally:
+            shutil.rmtree(to_bytes(local_tempdir, errors="surrogate_or_strict"))
 
-        # Content from config_template is converted to src
-        new_module_args.pop('content', None)
+        # NOTE(vermakov): let's use copy diff
+        # if self._play_context.diff:
+        #     copy_diff = result.pop("diff", None)
+        #     if copy_diff:
+        #         result["diff"] = [copy_diff]
+        #     else:
+        #         result["diff"] = []
 
-        # remove render enablement option
-        new_module_args.pop('render_template', None)
+        #     result["diff"].append(
+        #         {"prepared": json.dumps(mods, indent=4, sort_keys=True)}
+        #     )
 
-        # Run the copy module
-        rc = self._execute_module(
-            module_name='copy',
-            module_args=new_module_args,
-            task_vars=task_vars
-        )
-        copy_changed = rc.get('changed')
-        if not copy_changed:
-            rc['changed'] = changed
+        self._remove_tmp_path(self._connection._shell.tmpdir)
 
-        if self._play_context.diff:
-            rc['diff'] = []
-            rc['diff'].append(
-                {'prepared': json.dumps(mods, indent=4, sort_keys=True)})
-        if self._task.args.get('content'):
-            os.remove(_vars['source'])
-        return rc
+        return result
