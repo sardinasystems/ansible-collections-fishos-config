@@ -7,17 +7,17 @@ description: |-
   A collection with modified config_template and other helpers we commonly use.
 
 authors:
-    - Vladimir Ermakov <vooon341@gmail.com>
-    - Kevin Carter <kevin.carter@rackspace.com>
-    - Jimmy McCrory <jimmy.mccrory@gmail.com>
-    - Jean-Philippe Evrard <jean-philippe.evrard@rackspace.co.uk>
-    - Logan V <logan2211@gmail.com>
+  - Vladimir Ermakov <vooon341@gmail.com>
+  - Kevin Carter <kevin.carter@rackspace.com>
+  - Jimmy McCrory <jimmy.mccrory@gmail.com>
+  - Jean-Philippe Evrard <jean-philippe.evrard@rackspace.co.uk>
+  - Logan V <logan2211@gmail.com>
 
 license:
-    - "Apache-2.0"
+  - "Apache-2.0"
 
 tags:
-    - template
-    - config
+  - template
+  - config
 
 repository: "https://github.com/sardinasystems/ansible-collections-fishos-config"
