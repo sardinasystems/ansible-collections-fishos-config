@@ -12,7 +12,7 @@ _StrOrList = typing.Union[str, typing.Iterable[str]]
 _FloatOrList = typing.Union[float, typing.Iterable[float]]
 
 
-def dur2sec(dur: _StrOrList) -> _FloatOrList:
+def dur2sec(dur: _StrOrList) -> _StrOrList:
     if not isinstance(dur, (string_types, Iterable)):
         raise AnsibleFilterTypeError(f"dur should be string or list, got: {dur!r}")
 
@@ -20,17 +20,17 @@ def dur2sec(dur: _StrOrList) -> _FloatOrList:
         td = durationpy.from_str(dur)
         return td.total_seconds()
 
-    return (dur2sec(d2) for d2 in dur)
+    return (dur2sec(d2) for d2 in dur)  # type: ignore
 
 
-def sec2dur(sec: _FloatOrList) -> _StrOrList:
+def sec2dur(sec: _FloatOrList) -> _FloatOrList:
     if not isinstance(sec, (float, Iterable)):
         raise AnsibleFilterTypeError(f"sec should be float or list, got: {sec!r}")
 
     if isinstance(sec, float):
         return durationpy.to_str(timedelta(seconds=sec))
 
-    return (sec2dur(s2) for s2 in sec)
+    return (sec2dur(s2) for s2 in sec)  # type: ignore
 
 
 class FilterModule:
