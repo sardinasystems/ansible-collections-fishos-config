@@ -94,25 +94,25 @@ author: Kevin Carter
 """
 
 EXAMPLES = """
-  - name: run config template ini
-    config_template:
-      src: templates/test.ini.j2
-      dest: /tmp/test.ini
-      config_overrides: {}
-      top_ini_section: 'global'
-      config_type: ini
+- name: run config template ini
+  config_template:
+    src: templates/test.ini.j2
+    dest: /tmp/test.ini
+    config_overrides: {}
+    top_ini_section: 'global'
+    config_type: ini
 
-  - name: run config template json
-    config_template:
-      src: templates/test.json.j2
-      dest: /tmp/test.json
-      config_overrides: {}
-      config_type: json
+- name: run config template json
+  config_template:
+    src: templates/test.json.j2
+    dest: /tmp/test.json
+    config_overrides: {}
+    config_type: json
 
-  - name: run config template yaml
-    config_template:
-      src: templates/test.yaml.j2
-      dest: /tmp/test.yaml
-      config_overrides: {}
-      config_type: yaml
+- name: run config template yaml
+  config_template:
+    src: templates/test.yaml.j2
+    dest: /tmp/test.yaml
+    config_overrides: {}
+    config_type: yaml
 """
