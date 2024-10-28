@@ -1,19 +1,23 @@
 ---
-namespace: "openstack"
+namespace: fishos
+name: config
+version: 2.0.0
+readme: README.md
 description: |-
-  Template includes config_template module, that leverages template module and
-  adds override functionality to different types of config files.
-name: "config_template"
-version: "2.1.1"
-readme: "README.rst"
+  A collection with modified config_template and other helpers we commonly use.
+
 authors:
+    - Vladimir Ermakov <vooon341@gmail.com>
     - Kevin Carter <kevin.carter@rackspace.com>
     - Jimmy McCrory <jimmy.mccrory@gmail.com>
     - Jean-Philippe Evrard <jean-philippe.evrard@rackspace.co.uk>
     - Logan V <logan2211@gmail.com>
+
 license:
     - "Apache-2.0"
+
 tags:
     - template
     - config
-repository: "https://opendev.org/openstack/ansible-config_template"
+
+repository: "https://github.com/sardinasystems/ansible-collections-fishos-config"
