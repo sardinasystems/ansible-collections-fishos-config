@@ -1,0 +1,11 @@
+ancestor: null
+releases:
+  2.0.0:
+    changes:
+      breaking_changes:
+      - Alias config_template to template.
+      - Import some useful config filters.
+      - Imported back config_template from monorepo.
+    fragments:
+    - reimport.yml
+    release_date: '2024-10-28'
