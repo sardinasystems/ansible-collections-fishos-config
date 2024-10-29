@@ -42,7 +42,7 @@ def oncalendar_dur(
 
     it = oncalendar(spec, start_time, tz, iter_max)
 
-    prev = next(it)
+    prev: dt.datetime = next(it)  # type: ignore
     for new in it:
         d: dt.timedelta = new - prev
         yield d.total_seconds()
