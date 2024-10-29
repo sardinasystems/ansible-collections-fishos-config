@@ -4,9 +4,9 @@
 image: $PYTHON_IMAGE
 
 include:
-  - component: $CI_SERVER_FQDN/sdn/cicd-components/ansible-lint@~latest
-    inputs:
-      stage: lint
+  # - component: $CI_SERVER_FQDN/sdn/cicd-components/ansible-lint@~latest
+  #   inputs:
+  #     stage: lint
   - component: $CI_SERVER_FQDN/sdn/cicd-components/j2lint@~latest
     inputs:
       stage: lint
@@ -46,18 +46,17 @@ variables:
   tags: [x86_64]
 
 
-# ansible-lint:
-#   extends: .lint
-#   # allow_failure: true
-#   script:
-#     - >-
-#       grep -Rl '^- hosts: \|^  hosts: ' --include \*.yml --include \*.yaml --exclude-dir collections --exclude-dir .venv --exclude-dir roles |
-#       xargs poetry run ansible-lint --show-relpath --parseable --nocolor |
-#       poetry run ansible-lint-junit -o ansible-lint.xml
-#   artifacts:
-#     when: always
-#     reports:
-#       junit: ansible-lint.xml
+ansible-lint:
+  extends: .lint
+  # allow_failure: true
+  script:
+    - >-
+      poetry run ansible-lint --show-relpath --parseable --nocolor |
+      poetry run ansible-lint-junit -o ansible-lint.xml
+  artifacts:
+    when: always
+    reports:
+      junit: ansible-lint.xml
 
 
 pytest:

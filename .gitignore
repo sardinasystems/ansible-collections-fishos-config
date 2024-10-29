@@ -68,3 +68,4 @@ tests/*.retry
 openstack-ansible-ops
 previous
 changelogs/.plugin-cache.yaml
+ansible-lint.xml
