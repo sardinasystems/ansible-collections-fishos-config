@@ -56,6 +56,7 @@ iniparse = { git = "https://github.com/candlepin/python-iniparse.git", rev = "26
 hjson = "^3"
 durationpy = "*"
 oncalendar = "^1"
+jsonpatch = "^1"
 
 [tool.poetry.group.dev.dependencies]
 ansible = "^10"

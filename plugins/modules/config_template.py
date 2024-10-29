@@ -28,10 +28,13 @@ options:
     default: null
   config_overrides:
     description:
-      - A dictionary used to update or override items within a configuration template.
+      - Support two modes of operation: simple dict merge and RFC 6902 JSON Patch.
+      - Simple merge: A dictionary used to update or override items within a configuration template.
         The dictionary data structure may be nested. If the target config file is an ini
         file the nested keys in the ``config_overrides`` will be used as section
         headers.
+      - JSON Patch: A list of dicts like {"op": "add", "path": "/foo", "value": "bar"}
+    type: json
   config_type:
     description:
       - A string value describing the target config type.

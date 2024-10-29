@@ -31,6 +31,7 @@ import shutil
 import tempfile
 import typing
 from io import StringIO
+
 import hjson
 import tomlkit
 from ansible import constants as C
@@ -43,8 +44,8 @@ from ansible.plugins.action import ActionBase
 from ansible.template import AnsibleEnvironment, generate_ansible_template_vars
 from iniparse import ini
 from iniparse.utils import tidy as ini_tidy
+from jsonpatch import JsonPatch
 from ruamel.yaml import YAML
-
 
 _DocT = typing.Union[dict, list]
 
@@ -198,13 +199,59 @@ class INIConfig(ini.INIConfig):
 
 
 @dataclasses.dataclass
+class SimpleMerger:
+    new_items: _DocT
+    list_extend: bool = True
+    yml_multilines: bool = False
+
+    def apply(self, base_items: _DocT, in_place: bool = True) -> _DocT:
+        """Recursively merge new_items into base_items."""
+        if isinstance(self.new_items, dict):
+            for key, value in self.new_items.items():
+                if isinstance(value, dict):
+                    base_items[key] = SimpleMerger(
+                        value, self.list_extend, self.yml_multilines
+                    ).apply(
+                        base_items.get(key, {})  # type: ignore
+                    )
+
+                elif not isinstance(value, int) and (
+                    "," in value or ("\n" in value and not self.yml_multilines)
+                ):
+                    base_items[key] = re.split(",|\n", value)
+                    base_items[key] = [i.strip() for i in base_items[key] if i]
+                elif isinstance(value, list):
+                    if isinstance(base_items.get(key), list) and self.list_extend:  # type: ignore
+                        base_items[key].extend(value)
+                    else:
+                        base_items[key] = value
+                elif isinstance(value, (tuple, set)):
+                    if isinstance(base_items.get(key), tuple) and self.list_extend:  # type: ignore
+                        base_items[key] += tuple(value)
+                    elif isinstance(base_items.get(key), list) and self.list_extend:  # type: ignore
+                        base_items[key].extend(list(value))
+                    else:
+                        base_items[key] = value
+                else:
+                    base_items[key] = self.new_items[key]
+
+        elif isinstance(self.new_items, list):
+            if self.list_extend:
+                base_items.extend(self.new_items)  # type: ignore
+            else:
+                base_items = self.new_items
+
+        return base_items
+
+
+@dataclasses.dataclass
 class TaskArgs:
     source: str = None  # type: ignore # src or temp file
     dest: str = None  # type: ignore # remote path, type: ignore
     src: str = None  # type: ignore # local template file, type: ignore
     remote_src: bool = False  # use remote file as source
     content: typing.Any = None  # content, will be placed to temp file
-    config_overrides: dict = dataclasses.field(default_factory=dict)
+    config_overrides: typing.Optional[_DocT] = None
     config_type: str = "ini"
     searchpath: list = dataclasses.field(default_factory=list)
     list_extend: bool = False
@@ -227,6 +274,7 @@ class TaskArgs:
     comment_end_string: str = None  # type: ignore
     render_template: bool = True
     state: str = None  # type: ignore # should not be set
+    _patcher: typing.Union[None, SimpleMerger, JsonPatch] = None
 
     @classmethod
     def from_args(cls, task_args: dict) -> "TaskArgs":
@@ -269,12 +317,21 @@ class ActionModule(ActionBase):
         config = INIConfig.from_string(resultant, args.source)
         config.merge_repeated_options()
 
-        for section, items in args.config_overrides.items():
-            # If the items value is not a dictionary it is assumed that the
-            #  value is a default item for this config type.
-            if not isinstance(items, dict):
-                config.set_option(args.default_section, section, items, args)
-            else:
+        if isinstance(args._patcher, SimpleMerger):
+            assert isinstance(args.config_overrides, dict)
+            for section, items in args.config_overrides.items():
+                # If the items value is not a dictionary it is assumed that the
+                #  value is a default item for this config type.
+                if not isinstance(items, dict):
+                    config.set_option(args.default_section, section, items, args)
+                else:
+                    for key, value in items.items():
+                        config.set_option(section, key, value, args)
+
+        elif isinstance(args._patcher, JsonPatch):
+            base_items = config.as_dict()
+            args._patcher.apply(base_items, in_place=True)
+            for section, items in base_items.items():
                 for key, value in items.items():
                     config.set_option(section, key, value, args)
 
@@ -295,11 +352,7 @@ class ActionModule(ActionBase):
         information within the json file will be sorted by keys.
         """
         original_resultant = loads(resultant)
-        merged_resultant = self._merge_dict(
-            base_items=original_resultant,
-            new_items=args.config_overrides,
-            list_extend=args.list_extend,
-        )
+        merged_resultant = self._patch(args, original_resultant)
         indent = args.json_indent if args.json_indent > 0 else None
         return (
             json.dumps(
@@ -337,12 +390,7 @@ class ActionModule(ActionBase):
             ], "More than one YAML document separator is not supported!"
 
         original_resultant = yaml.load(StringIO(resultant)) or {}
-        merged_resultant = self._merge_dict(
-            base_items=original_resultant,
-            new_items=args.config_overrides,
-            list_extend=args.list_extend,
-            yml_multilines=args.yml_multilines,
-        )
+        merged_resultant = self._patch(args, original_resultant)
 
         out = StringIO()
         yaml.dump(merged_resultant, out)
@@ -366,11 +414,7 @@ class ActionModule(ActionBase):
     ) -> typing.Tuple[str, _DocT]:
         """Returns config toml and dict of merged config"""
         original_resultant = tomlkit.loads(resultant)
-        merged_resultant = self._merge_dict(
-            base_items=original_resultant,
-            new_items=args.config_overrides,
-            list_extend=args.list_extend,
-        )
+        merged_resultant = self._patch(args, original_resultant)
         return (
             tomlkit.dumps(
                 merged_resultant,
@@ -378,47 +422,9 @@ class ActionModule(ActionBase):
             merged_resultant,
         )
 
-    def _merge_dict(
-        self,
-        base_items: _DocT,
-        new_items: _DocT,
-        list_extend: bool = True,
-        yml_multilines: bool = False,
-    ) -> _DocT:
-        """Recursively merge new_items into base_items."""
-        if isinstance(new_items, dict):
-            for key, value in new_items.items():
-                if isinstance(value, dict):
-                    base_items[key] = self._merge_dict(
-                        base_items=base_items.get(key, {}),  # type: ignore
-                        new_items=value,
-                        list_extend=list_extend,
-                    )
-                elif not isinstance(value, int) and (
-                    "," in value or ("\n" in value and not yml_multilines)
-                ):
-                    base_items[key] = re.split(",|\n", value)
-                    base_items[key] = [i.strip() for i in base_items[key] if i]
-                elif isinstance(value, list):
-                    if isinstance(base_items.get(key), list) and list_extend:  # type: ignore
-                        base_items[key].extend(value)
-                    else:
-                        base_items[key] = value
-                elif isinstance(value, (tuple, set)):
-                    if isinstance(base_items.get(key), tuple) and list_extend:  # type: ignore
-                        base_items[key] += tuple(value)
-                    elif isinstance(base_items.get(key), list) and list_extend:  # type: ignore
-                        base_items[key].extend(list(value))
-                    else:
-                        base_items[key] = value
-                else:
-                    base_items[key] = new_items[key]
-
-        elif isinstance(new_items, list):
-            if list_extend:
-                base_items.extend(new_items)  # type: ignore
-            else:
-                base_items = new_items
+    def _patch(self, args: TaskArgs, base_items: _DocT) -> _DocT:
+        if args._patcher is not None:
+            return args._patcher.apply(base_items, in_place=True)
 
         return base_items
 
@@ -482,6 +488,21 @@ class ActionModule(ActionBase):
             user_dest = os.path.join(user_dest, os.path.basename(args.source))
 
         args.dest = user_dest
+
+        # Default - nothing to do
+        # if args.config_overrides is None:
+        #     args.config_overrides = {}
+
+        if isinstance(args.config_overrides, list):
+            args._patcher = JsonPatch(args.config_overrides)
+
+        elif isinstance(args.config_overrides, dict):
+            args._patcher = SimpleMerger(
+                new_items=args.config_overrides,
+                list_extend=args.list_extend,
+                yml_multilines=args.yml_multilines,
+            )
+
         return args
 
     def run(self, tmp=None, task_vars=None):
