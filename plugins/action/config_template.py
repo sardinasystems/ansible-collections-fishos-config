@@ -31,7 +31,7 @@ import shutil
 import tempfile
 import typing
 from io import StringIO
-
+import hjson
 import tomlkit
 from ansible import constants as C
 from ansible.config.manager import ensure_type
@@ -44,6 +44,9 @@ from ansible.template import AnsibleEnvironment, generate_ansible_template_vars
 from iniparse import ini
 from iniparse.utils import tidy as ini_tidy
 from ruamel.yaml import YAML
+
+
+_DocT = typing.Union[dict, list]
 
 
 class OptionLine(ini.OptionLine):
@@ -119,7 +122,7 @@ class INIConfig(ini.INIConfig):
 
         return resultant
 
-    def merge_repeated_options(self):
+    def merge_repeated_options(self) -> None:
         for section_name in list(self):
             section = self[section_name]
             for container in section._lines:
@@ -144,7 +147,9 @@ class INIConfig(ini.INIConfig):
         ini_tidy(self)
 
     def as_dict(self) -> typing.Dict[str, dict]:
-        def yield_section(sect):
+        def yield_section(
+            sect,
+        ) -> typing.Generator[typing.Tuple[str, dict], None, None]:
             for name in sect:
                 v = sect[name]
                 if isinstance(v, string_types) and "\n" in v:
@@ -159,7 +164,7 @@ class INIConfig(ini.INIConfig):
         section: str,
         key: str,
         value: typing.Any,
-        args: "TaskArgs" = None,
+        args: typing.Optional["TaskArgs"] = None,
     ):
         if args is None:
             args = TaskArgs()
@@ -194,12 +199,12 @@ class INIConfig(ini.INIConfig):
 
 @dataclasses.dataclass
 class TaskArgs:
-    source: str = None  # src or temp file
-    dest: str = None  # remote path
-    src: str = None  # local template file
+    source: str = None  # type: ignore # src or temp file
+    dest: str = None  # type: ignore # remote path, type: ignore
+    src: str = None  # type: ignore # local template file, type: ignore
     remote_src: bool = False  # use remote file as source
     content: typing.Any = None  # content, will be placed to temp file
-    config_overrides: dict = dataclasses.field(default_factory=dict)  # overrides
+    config_overrides: dict = dataclasses.field(default_factory=dict)
     config_type: str = "ini"
     searchpath: list = dataclasses.field(default_factory=list)
     list_extend: bool = False
@@ -208,23 +213,24 @@ class TaskArgs:
     ini_list_sep: str = ","
     ini_tidy: bool = True
     json_indent: int = 4
+    json_sort_keys: bool = True
     yml_multilines: bool = False  # maybe unsupported
     yaml_indent_mapping: int = 2
     yaml_indent_sequence: int = 4
     yaml_indent_offset: int = 2
     strip_comments: bool = False
-    block_start_string: str = None
-    block_end_string: str = None
-    variable_start_string: str = None
-    variable_end_string: str = None
-    comment_start_string: str = None
-    comment_end_string: str = None
+    block_start_string: str = None  # type: ignore
+    block_end_string: str = None  # type: ignore
+    variable_start_string: str = None  # type: ignore
+    variable_end_string: str = None  # type: ignore
+    comment_start_string: str = None  # type: ignore
+    comment_end_string: str = None  # type: ignore
     render_template: bool = True
-    state: str = None  # should not be set
+    state: str = None  # type: ignore # should not be set
 
     @classmethod
     def from_args(cls, task_args: dict) -> "TaskArgs":
-        def yiled_args() -> (str, typing.Any):
+        def yiled_args() -> typing.Generator[typing.Tuple[str, typing.Any], None, None]:
             for field in dataclasses.fields(cls):
                 v = task_args.get(field.name, field.default)
                 if isinstance(field.type, bool):
@@ -242,11 +248,13 @@ class TaskArgs:
 class ActionModule(ActionBase):
     TRANSFERS_FILES = True
 
-    def type_merger(self, resultant: str, args: TaskArgs) -> (str, dict):
+    def type_merger(self, resultant: str, args: TaskArgs) -> typing.Tuple[str, _DocT]:
         if args.config_type == "ini":
             return self.return_config_overrides_ini(resultant, args)
         elif args.config_type == "json":
-            return self.return_config_overrides_json(resultant, args)
+            return self.return_config_overrides_json(resultant, args, json.loads)
+        elif args.config_type == "hjson":
+            return self.return_config_overrides_json(resultant, args, hjson.loads)
         elif args.config_type == "yaml":
             return self.return_config_overrides_yaml(resultant, args)
         elif args.config_type == "toml":
@@ -256,7 +264,7 @@ class ActionModule(ActionBase):
 
     def return_config_overrides_ini(
         self, resultant: str, args: TaskArgs
-    ) -> (str, dict):
+    ) -> typing.Tuple[str, _DocT]:
         """Returns string value from a modified config file and dict of merged config"""
         config = INIConfig.from_string(resultant, args.source)
         config.merge_repeated_options()
@@ -276,34 +284,35 @@ class ActionModule(ActionBase):
         return config.to_string(), config.as_dict()
 
     def return_config_overrides_json(
-        self, resultant: str, args: TaskArgs
-    ) -> (str, dict):
+        self,
+        resultant: str,
+        args: TaskArgs,
+        loads: typing.Callable[[typing.Any], typing.Any],
+    ) -> typing.Tuple[str, _DocT]:
         """Returns config json and dict of merged config
 
         Its important to note that file ordering will not be preserved as the
         information within the json file will be sorted by keys.
         """
-        original_resultant = json.loads(resultant)
+        original_resultant = loads(resultant)
         merged_resultant = self._merge_dict(
             base_items=original_resultant,
             new_items=args.config_overrides,
             list_extend=args.list_extend,
         )
-        indent = args.json_indent
-        if indent < 0:
-            indent = None
+        indent = args.json_indent if args.json_indent > 0 else None
         return (
             json.dumps(
                 merged_resultant,
                 indent=indent,
-                sort_keys=True,
+                sort_keys=args.json_sort_keys,
             ),
             merged_resultant,
         )
 
     def return_config_overrides_yaml(
         self, resultant: str, args: TaskArgs
-    ) -> (str, dict):
+    ) -> typing.Tuple[str, _DocT]:
         """Return config yaml and dict of merged config"""
         yaml = YAML(typ=args.strip_comments and "safe" or "rt")  # type: ignore
         yaml.default_flow_style = False
@@ -354,7 +363,7 @@ class ActionModule(ActionBase):
 
     def return_config_overrides_toml(
         self, resultant: str, args: TaskArgs
-    ) -> (str, dict):
+    ) -> typing.Tuple[str, _DocT]:
         """Returns config toml and dict of merged config"""
         original_resultant = tomlkit.loads(resultant)
         merged_resultant = self._merge_dict(
@@ -371,17 +380,17 @@ class ActionModule(ActionBase):
 
     def _merge_dict(
         self,
-        base_items: typing.Union[dict, list],
-        new_items: typing.Union[dict, list],
+        base_items: _DocT,
+        new_items: _DocT,
         list_extend: bool = True,
         yml_multilines: bool = False,
-    ) -> dict:
+    ) -> _DocT:
         """Recursively merge new_items into base_items."""
         if isinstance(new_items, dict):
             for key, value in new_items.items():
                 if isinstance(value, dict):
                     base_items[key] = self._merge_dict(
-                        base_items=base_items.get(key, {}),
+                        base_items=base_items.get(key, {}),  # type: ignore
                         new_items=value,
                         list_extend=list_extend,
                     )
@@ -391,14 +400,14 @@ class ActionModule(ActionBase):
                     base_items[key] = re.split(",|\n", value)
                     base_items[key] = [i.strip() for i in base_items[key] if i]
                 elif isinstance(value, list):
-                    if isinstance(base_items.get(key), list) and list_extend:
+                    if isinstance(base_items.get(key), list) and list_extend:  # type: ignore
                         base_items[key].extend(value)
                     else:
                         base_items[key] = value
                 elif isinstance(value, (tuple, set)):
-                    if isinstance(base_items.get(key), tuple) and list_extend:
+                    if isinstance(base_items.get(key), tuple) and list_extend:  # type: ignore
                         base_items[key] += tuple(value)
-                    elif isinstance(base_items.get(key), list) and list_extend:
+                    elif isinstance(base_items.get(key), list) and list_extend:  # type: ignore
                         base_items[key].extend(list(value))
                     else:
                         base_items[key] = value
@@ -407,7 +416,7 @@ class ActionModule(ActionBase):
 
         elif isinstance(new_items, list):
             if list_extend:
-                base_items.extend(new_items)
+                base_items.extend(new_items)  # type: ignore
             else:
                 base_items = new_items
 
@@ -417,10 +426,10 @@ class ActionModule(ActionBase):
         """Return options and status from module load."""
 
         args = TaskArgs.from_args(self._task.args)
-        if args.config_type not in ["ini", "yaml", "json", "toml"]:
+        if args.config_type not in ["ini", "yaml", "json", "hjson", "toml"]:
             raise AnsibleActionFail(
                 "No valid [ config_type ] was provided. Valid options are"
-                " ini, yaml, json or toml.",
+                " ini, yaml, json, hjson or toml.",
             )
 
         if args.state is not None:

@@ -53,6 +53,7 @@ python = "^3.11"
 tomlkit = "*"
 # iniparse = "*"  # we need line_number which is post 0.5
 iniparse = { git = "https://github.com/candlepin/python-iniparse.git", rev = "26f82c4" }
+hjson = "^3"
 durationpy = "*"
 oncalendar = "^1"
 

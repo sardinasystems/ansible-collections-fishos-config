@@ -38,6 +38,7 @@ options:
     choices:
       - ini
       - json
+      - hjson
       - yaml
       - toml
   list_extend:
@@ -47,18 +48,14 @@ options:
         using a list is being set for the existing "key". This functionality
         can be toggled on or off using this option. If disabled an override
         list will replace an existing "key".
-    choices:
-      - True
-      - False
+    type: bool
   ignore_none_type:
     description:
       - Can be true or false. If ignore_none_type is set to true, then
         valueless INI options will not be written out to the resultant file.
         If it's set to false, then config_template will write out only
         the option name without the '=' or ':' suffix. The default is true.
-    choices:
-      - True
-      - False
+    type: bool
   default_section:
     description:
       - Specify the default section for INI configuration files. This is the
@@ -72,24 +69,43 @@ options:
       - If false, it will search the originating machine.
       - If true, it will go to the remote/target machine to inject the
         template. If the remote source does not exist the module will fail.
-    choices:
-      - True
-      - False
+    type: bool
     default: false
   render_template:
     description:
       - Enable or disable the template render engine. This is useful when
         dealing with remote data that may have jinja content in the comment
         sections but is not in need of rendering.
-    choices:
-      - True
-      - False
+    type: bool
     default: true
   strip_comments:
     description:
       - Strip all comment and empty lines in INI
-    type: boolean
+    type: bool
     default: false
+  json_indent:
+    description:
+      - JSON and HJSON identation
+    type: int
+    default: 4
+  json_sort_keys:
+    description:
+      - Sort dict keys in JSON result
+  yaml_indent_mapping:
+    description:
+      - YAML mapping indent
+    type: int
+    default: 2
+  yaml_indent_sequence:
+    description:
+      - YAML sequence indent
+    type: int
+    default: 4
+  yaml_indent_offset:
+    description:
+      - YAML offset indent
+    type: int
+    default: 2
 author: Kevin Carter
 """
 

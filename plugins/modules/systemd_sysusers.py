@@ -14,7 +14,7 @@ ANSIBLE_METADATA = {
 
 DOCUMENTATION = """
 ---
-module: systemd_tmpfiles
+module: systemd_sysusers
 short_description: Manage systemd sysusers
 version_added: "2.9"
 description:
@@ -63,7 +63,7 @@ EXAMPLES = """
         u haproxy 188 "HAProxy" /var/lib/haproxy
 
 - name: remove file
-  systemd_override:
+  systemd_sysusers:
     name: myservice
     state: absent
 """

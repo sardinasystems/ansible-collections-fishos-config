@@ -63,7 +63,7 @@ EXAMPLES = """
         d /etc/myservice 0755 root root - -
 
 - name: remove file
-  systemd_override:
+  systemd_tmpfiles:
     name: myservice
     state: absent
 """
