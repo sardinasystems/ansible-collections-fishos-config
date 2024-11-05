@@ -46,6 +46,8 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
+# currently we do not package collection as python dist
+package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.11"
