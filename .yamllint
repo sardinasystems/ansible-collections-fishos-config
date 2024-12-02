@@ -2,9 +2,9 @@
 extends: default
 
 ignore: |
-  collections
   .venv
   .gitlab-ci.yml
+  changelogs/changelog.yaml
 
 rules:
   braces:
