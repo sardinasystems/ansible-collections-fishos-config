@@ -11,7 +11,8 @@ classifiers = [
     "Environment :: OpenStack",
     "Intended Audience :: Information Technology",
     "Operating System :: Linux",
-    "Operating System :: Linux :: CentOS",
+    "Operating System :: Linux :: AlmaLinux",
+    "Operating System :: Linux :: Debian",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -41,7 +42,8 @@ classifiers = [
     "Environment :: OpenStack",
     "Intended Audience :: Information Technology",
     "Operating System :: Linux",
-    "Operating System :: Linux :: CentOS",
+    "Operating System :: Linux :: AlmaLinux",
+    "Operating System :: Linux :: Debian",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -61,7 +63,7 @@ oncalendar = "^1"
 jsonpatch = "^1"
 
 [tool.poetry.group.dev.dependencies]
-ansible = "^10"
+ansible = "^11"
 # ansible-lint = { git = "https://github.com/ansible-community/ansible-lint.git", markers = "platform_system != 'Windows'" }
 ansible-lint = { version = "*", markers = "platform_system != 'Windows'" }
 mypy = "*"
