@@ -16,6 +16,7 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 
 [[project.authors]]
@@ -47,6 +48,7 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 # currently we do not package collection as python dist
 package-mode = false
@@ -55,8 +57,8 @@ package-mode = false
 python = "^3.11"
 "ruamel.yaml" = "*"
 tomlkit = "*"
-# iniparse = "*"  # we need line_number which is post 0.5
-iniparse = { git = "https://github.com/candlepin/python-iniparse.git", rev = "26f82c4" }
+# iniparse = ">=0.5.1"  # we need line_number which is post 0.5
+iniparse = { git = "https://github.com/candlepin/python-iniparse.git", rev = "0.5.1" }
 hjson = "^3"
 durationpy = "*"
 oncalendar = "^1"
