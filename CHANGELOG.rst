@@ -4,6 +4,14 @@ Fishos.Config Release Notes
 
 .. contents:: Topics
 
+v2.1.1
+======
+
+Release Summary
+---------------
+
+Update iniparse to 0.5.1
+
 v2.1.0
 ======
 

@@ -17,3 +17,9 @@ releases:
     fragments:
     - ansible11.yml
     release_date: '2024-12-02'
+  2.1.1:
+    changes:
+      release_summary: Update iniparse to 0.5.1
+    fragments:
+    - rel.yml
+    release_date: '2025-01-06'

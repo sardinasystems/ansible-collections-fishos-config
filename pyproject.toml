@@ -1,6 +1,6 @@
 [project]
 name = "ansible-collections-fishos-config"
-version = "2.1.0"
+version = "2.1.1"
 description = "A collection with modified config_template and other helpers we commonly use."
 license = {text = "Apache-2.0"}
 readme = "README.md"
@@ -32,7 +32,7 @@ build-backend = "poetry.masonry.api"
 
 [tool.poetry]
 name = "ansible-collections-fishos-config"
-version = "2.1.0"
+version = "2.1.1"
 description = "A collection with modified config_template and other helpers we commonly use."
 authors = ["Sardina Systems <info@sardinasystems.com>"]
 license = "Apache-2.0"
