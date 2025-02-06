@@ -4,6 +4,14 @@ Fishos.Config Release Notes
 
 .. contents:: Topics
 
+v2.2.0
+======
+
+Release Summary
+---------------
+
+Update to Ansible 11.2.0
+
 v2.1.1
 ======
 
