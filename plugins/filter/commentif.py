@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright: (c) 2024, Sardina Systems Ltd.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -17,7 +16,7 @@ def commentif(context, text, cond=True, style="plain", **kw):
         return text
 
 
-class FilterModule(object):
+class FilterModule:
     """Ansible port jinja2 filters"""
 
     def filters(self):

@@ -126,11 +126,15 @@ def test_json_config_type(action):
         rendered, args, __import__("json").loads
     )
 
-    assert __import__("json").loads(resultant) == config_base == {
-        "name": "demo",
-        "port": 9090,
-        "items": ["base"],
-    }
+    assert (
+        __import__("json").loads(resultant)
+        == config_base
+        == {
+            "name": "demo",
+            "port": 9090,
+            "items": ["base"],
+        }
+    )
 
 
 def test_ini_config_type(action):

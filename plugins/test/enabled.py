@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright: (c) 2024, Sardina Systems Ltd.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -12,7 +11,7 @@ WhenConvertible = None | str | bool
 WhenArg = WhenConvertible | list[WhenConvertible]
 
 
-class TestModule(object):
+class TestModule:
     """Ansible tests"""
 
     def tests(self):
