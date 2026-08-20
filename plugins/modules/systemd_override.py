@@ -86,9 +86,9 @@ override_file:
   type: str
 """
 
-from pathlib import Path  # noqa: E402 isort:skip
+from pathlib import Path
 
-from ansible.module_utils.basic import AnsibleModule  # noqa: E402 isort:skip
+from ansible.module_utils.basic import AnsibleModule
 
 
 def run_module():

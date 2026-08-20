@@ -81,3 +81,11 @@ Homepage = "https://github.com/vooon/ansible-collections-vooon-config"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.ruff.lint]
+# Rules not enforced here, as they are idiomatic for Ansible collection plugins:
+#   C408  - `dict()` is preferred in dynamic construction contexts
+#   EXE001 - plugin/module files keep a shebang but need not be executable
+#   BLE001 - broad `except Exception` is intentional in action/module error mapping
+#   RUF012 - class-level list/tuple constants used with legacy iniparse
+ignore = ["C408", "EXE001", "BLE001", "RUF012"]

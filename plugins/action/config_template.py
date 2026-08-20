@@ -670,7 +670,7 @@ class ActionModule(ActionBase):
             if args._temp_src and os.path.exists(args._temp_src):
                 os.unlink(args._temp_src)
 
-        resultant, config_base = self.type_merger(resultant, args)
+        resultant, _config_base = self.type_merger(resultant, args)
 
         if args.strip_comments and args.config_type == "ini":
             lines = [
