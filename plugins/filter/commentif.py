@@ -17,7 +17,7 @@ def commentif(context, text, cond=True, style="plain", **kw):
 
 
 class FilterModule:
-    """Ansible port jinja2 filters"""
+    """Ansible commentif jinja2 filters"""
 
     def filters(self):
         return {

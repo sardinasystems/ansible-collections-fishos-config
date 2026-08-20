@@ -68,7 +68,7 @@ def oncalendar_dur(
 
 
 class FilterModule:
-    """Ansible argsenvfmt jinja2 filters"""
+    """Ansible oncalendar_dur jinja2 filters"""
 
     def filters(self):
         return {

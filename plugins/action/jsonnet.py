@@ -59,7 +59,7 @@ class ActionModule(ActionBase):
         del tmp  # tmp no longer has any effect
 
         # Options type validation
-        # stings
+        # strings
         for s_type in ("src", "dest", "state"):
             if s_type in self._task.args:
                 value = ensure_type(self._task.args[s_type], "string")
