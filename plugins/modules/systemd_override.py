@@ -96,7 +96,6 @@ def run_module():
         ("state", "present", ["content"]),
         ("state", "absent", []),
     ]
-    mutually_exclusive = []
     module_args = dict(
         name=dict(type="str", required=True),
         unit=dict(type="str", required=True),
@@ -118,7 +117,6 @@ def run_module():
     module = AnsibleModule(
         argument_spec=module_args,
         required_if=required_if,
-        mutually_exclusive=mutually_exclusive,
         add_file_common_args=True,
         supports_check_mode=True,
     )
@@ -192,9 +190,6 @@ def run_module():
             changed = True
             if not module.check_mode:
                 dirpath.rmdir()
-
-    else:
-        module.fail_json(msg="unknown state")
 
     module.exit_json(changed=changed, diff=diff, override_file=str(filepath))
 

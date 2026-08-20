@@ -34,7 +34,8 @@ def oncalendar(
     it = OnCalendar(spec, start_time)
 
     if iter_max <= 0:
-        return it
+        yield from it
+        return
 
     for _count in range(iter_max):
         try:
