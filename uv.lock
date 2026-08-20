@@ -226,7 +226,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "ansible", specifier = ">=14" },
+    { name = "ansible" },
     { name = "ansible-lint" },
     { name = "antsibull-changelog" },
     { name = "lxml" },

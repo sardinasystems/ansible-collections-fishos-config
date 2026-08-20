@@ -36,7 +36,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "ansible >= 14",
+    "ansible",
     "ansible-lint",
     "antsibull-changelog",
     # "black",
