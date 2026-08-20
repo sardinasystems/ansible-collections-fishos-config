@@ -63,11 +63,7 @@ try:
 except ImportError:
     YAML = None  # type: ignore[assignment,misc]
 
-try:
-    from ansible.module_utils.common.text.converters import to_bytes, to_text
-except ImportError:
-    # Compatibility with older ansible-core.
-    from ansible.module_utils._text import to_bytes, to_text
+from ansible.module_utils.common.text.converters import to_bytes, to_text
 
 _DocT = typing.Union[dict, list]
 
@@ -660,20 +656,12 @@ class ActionModule(ActionBase):
                     searchpath=args.searchpath,
                     available_variables=temp_vars,
                 )
-                if hasattr(templar, "template"):
-                    resultant = templar.template(
-                        template_data,
-                        preserve_trailing_newlines=True,
-                        escape_backslashes=False,
-                        overrides=template_overrides or None,
-                    )
-                else:
-                    resultant = templar.do_template(
-                        template_data,
-                        preserve_trailing_newlines=True,
-                        escape_backslashes=False,
-                        overrides=template_overrides or None,
-                    )
+                resultant = templar.template(
+                    template_data,
+                    preserve_trailing_newlines=True,
+                    escape_backslashes=False,
+                    overrides=template_overrides or None,
+                )
 
             else:
                 resultant = template_data
