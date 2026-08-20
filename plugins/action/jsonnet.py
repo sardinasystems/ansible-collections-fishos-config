@@ -38,7 +38,7 @@ except ImportError:
 class ActionModule(ActionBase):
     TRANSFERS_FILES = True
 
-    def import_callback(self, dirs, rel) -> typing.Tuple[str, bytes]:
+    def import_callback(self, dirs, rel) -> tuple[str, bytes]:
         for d in dirs:
             try:
                 full_path = self._find_needle(d, rel)

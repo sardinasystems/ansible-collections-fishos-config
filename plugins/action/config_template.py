@@ -65,7 +65,7 @@ except ImportError:
 
 from ansible.module_utils.common.text.converters import to_bytes, to_text
 
-_DocT = typing.Union[dict, list]
+_DocT = dict | list
 
 
 def _strip_ansible_tags(value: typing.Any) -> typing.Any:
@@ -179,7 +179,7 @@ if ini is not None:
                     if not isinstance(container, ini.LineContainer):
                         continue
 
-                    to_drop: typing.List[int] = []
+                    to_drop: list[int] = []
                     for idx, line in enumerate(container.contents):
                         if not isinstance(line, ini.LineContainer):
                             continue
@@ -196,10 +196,10 @@ if ini is not None:
         def tidy(self):
             ini_tidy(self)
 
-        def as_dict(self) -> typing.Dict[str, dict]:
+        def as_dict(self) -> dict[str, dict]:
             def yield_section(
                 sect,
-            ) -> typing.Generator[typing.Tuple[str, typing.Any], None, None]:
+            ) -> typing.Generator[tuple[str, typing.Any], None, None]:
                 for name in sect:
                     v = sect[name]
                     if isinstance(v, str) and "\n" in v:
@@ -310,7 +310,7 @@ class TaskArgs:
     src: str = None  # type: ignore # local template file, type: ignore
     remote_src: bool = False  # use remote file as source
     content: typing.Any = None  # content, will be placed to temp file
-    config_overrides: typing.Optional[_DocT] = None
+    config_overrides: _DocT | None = None
     config_type: str = "ini"
     searchpath: list = dataclasses.field(default_factory=list)
     list_extend: bool = False
@@ -333,8 +333,8 @@ class TaskArgs:
     comment_end_string: str = None  # type: ignore
     render_template: bool = True
     state: str = None  # type: ignore # should not be set
-    _temp_src: typing.Union[None, str] = None
-    _patcher: typing.Optional[typing.Any] = None
+    _temp_src: None | str = None
+    _patcher: typing.Any | None = None
 
     @classmethod
     def from_args(cls, task_args: dict) -> "TaskArgs":
@@ -349,7 +349,7 @@ class TaskArgs:
                 )
             return False
 
-        def yield_args() -> typing.Generator[typing.Tuple[str, typing.Any], None, None]:
+        def yield_args() -> typing.Generator[tuple[str, typing.Any], None, None]:
             for field in dataclasses.fields(cls):
                 if field.name not in task_args:
                     continue
@@ -371,7 +371,7 @@ class TaskArgs:
 class ActionModule(ActionBase):
     TRANSFERS_FILES = True
 
-    def type_merger(self, resultant: str, args: TaskArgs) -> typing.Tuple[str, _DocT]:
+    def type_merger(self, resultant: str, args: TaskArgs) -> tuple[str, _DocT]:
         if args.config_type == "ini":
             return self.return_config_overrides_ini(resultant, args)
         elif args.config_type == "json":
@@ -391,7 +391,7 @@ class ActionModule(ActionBase):
 
     def return_config_overrides_ini(
         self, resultant: str, args: TaskArgs
-    ) -> typing.Tuple[str, _DocT]:
+    ) -> tuple[str, _DocT]:
         """Returns string value from a modified config file and dict of merged config"""
         config = INIConfig.from_string(resultant, args.source)
         config.merge_repeated_options()
@@ -427,7 +427,7 @@ class ActionModule(ActionBase):
         resultant: str,
         args: TaskArgs,
         loads: typing.Callable[[typing.Any], typing.Any],
-    ) -> typing.Tuple[str, _DocT]:
+    ) -> tuple[str, _DocT]:
         """Returns config json and dict of merged config
 
         Its important to note that file ordering will not be preserved as the
@@ -447,7 +447,7 @@ class ActionModule(ActionBase):
 
     def return_config_overrides_yaml(
         self, resultant: str, args: TaskArgs
-    ) -> typing.Tuple[str, _DocT]:
+    ) -> tuple[str, _DocT]:
         """Return config yaml and dict of merged config"""
         if YAML is None:
             raise AnsibleActionFail(
@@ -497,7 +497,7 @@ class ActionModule(ActionBase):
 
     def return_config_overrides_toml(
         self, resultant: str, args: TaskArgs
-    ) -> typing.Tuple[str, _DocT]:
+    ) -> tuple[str, _DocT]:
         """Returns config toml and dict of merged config"""
         if tomlkit is None:
             raise AnsibleActionFail(

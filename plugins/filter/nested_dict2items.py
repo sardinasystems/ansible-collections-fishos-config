@@ -9,9 +9,9 @@ from ansible.errors import AnsibleFilterError
 
 
 def nested_dict2items(
-    inp: typing.Dict[str, typing.Dict[str, typing.Any]],
+    inp: dict[str, dict[str, typing.Any]],
     expected_depth: int = -1,
-) -> typing.Iterator[typing.Tuple]:
+) -> typing.Iterator[tuple]:
     """Recursively walks trough dict of dicts and returns tuple of as many items as many levels of nesting you have"""
 
     def recursive_down(d, parent=()):

@@ -15,7 +15,7 @@ except ImportError:
 
 def oncalendar(
     spec: str,
-    start_time: typing.Union[dt.datetime, str, None] = None,
+    start_time: dt.datetime | str | None = None,
     tz: dt.tzinfo = dt.UTC,
     iter_max: int = 0,
 ) -> typing.Iterable[dt.datetime]:
@@ -46,7 +46,7 @@ def oncalendar(
 
 def oncalendar_dur(
     spec: str,
-    start_time: typing.Union[dt.datetime, str, None] = None,
+    start_time: dt.datetime | str | None = None,
     tz: dt.tzinfo = dt.UTC,
     iter_max: int = 0,
 ) -> typing.Iterable[float]:
