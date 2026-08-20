@@ -263,7 +263,7 @@ class SimpleMerger:
     list_extend: bool = True
     yml_multilines: bool = False
 
-    def apply(self, base_items: _DocT, in_place: bool = True) -> _DocT:
+    def apply(self, base_items: _DocT) -> _DocT:
         """Recursively merge new_items into base_items."""
         if isinstance(self.new_items, dict):
             for key, value in self.new_items.items():
@@ -412,7 +412,7 @@ class ActionModule(ActionBase):
 
         elif JsonPatch is not None and isinstance(args._patcher, JsonPatch):
             base_items = config.as_dict()
-            args._patcher.apply(base_items, in_place=True)
+            args._patcher.apply(base_items)
             for section, items in base_items.items():
                 for key, value in items.items():
                     config.set_option(section, key, value, args)
@@ -514,7 +514,7 @@ class ActionModule(ActionBase):
 
     def _patch(self, args: TaskArgs, base_items: _DocT) -> _DocT:
         if args._patcher is not None:
-            return args._patcher.apply(base_items, in_place=True)
+            return args._patcher.apply(base_items)
 
         return base_items
 
@@ -581,10 +581,6 @@ class ActionModule(ActionBase):
             user_dest = os.path.join(user_dest, os.path.basename(args.source))
 
         args.dest = user_dest
-
-        # Default - nothing to do
-        # if args.config_overrides is None:
-        #     args.config_overrides = {}
 
         if isinstance(args.config_overrides, list):
             if JsonPatch is None:
@@ -723,18 +719,6 @@ class ActionModule(ActionBase):
 
         finally:
             shutil.rmtree(to_bytes(local_tempdir, errors="surrogate_or_strict"))
-
-        # NOTE(vermakov): let's use copy diff
-        # if self._play_context.diff:
-        #     copy_diff = result.pop("diff", None)
-        #     if copy_diff:
-        #         result["diff"] = [copy_diff]
-        #     else:
-        #         result["diff"] = []
-
-        #     result["diff"].append(
-        #         {"prepared": json.dumps(mods, indent=4, sort_keys=True)}
-        #     )
 
         self._remove_tmp_path(self._connection._shell.tmpdir)
 
