@@ -37,6 +37,7 @@ from ansible.config.manager import ensure_type
 from ansible.errors import AnsibleAction, AnsibleActionFail, AnsibleError
 from ansible.module_utils.parsing.convert_bool import boolean
 from ansible.plugins.action import ActionBase
+from ansible.plugins.action.template import trust_as_template
 from ansible.template import generate_ansible_template_vars
 
 try:
@@ -69,6 +70,36 @@ except ImportError:
     from ansible.module_utils._text import to_bytes, to_text
 
 _DocT = typing.Union[dict, list]
+
+
+def _strip_ansible_tags(value: typing.Any) -> typing.Any:
+    """Recursively convert ansible data-tagged values (e.g. ``_AnsibleTaggedInt``)
+    derived from templated task args back to plain Python scalars/containers.
+
+    ruamel.yaml's round-trip representer relies on exact type lookups and refuses
+    to serialize tagged ``str``/``int``/``bool`` subclasses that ansible-core 2.20+
+    wraps values in.
+    """
+    if hasattr(value, "ca"):
+        # ruamel round-trip node (CommentedMap/CommentedSeq): keep structure and
+        # comments, but normalize any tagged children in place.
+        if isinstance(value, dict):
+            for key in list(value):
+                value[key] = _strip_ansible_tags(value[key])
+        elif isinstance(value, list):
+            for idx in range(len(value)):
+                value[idx] = _strip_ansible_tags(value[idx])
+        return value
+    if isinstance(value, dict):
+        return {key: _strip_ansible_tags(v) for key, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_strip_ansible_tags(v) for v in value]
+    for base in (bool, int, str, float):
+        if isinstance(value, base):
+            if value.__class__.__module__ == "builtins":
+                return value
+            return base(value)
+    return value
 
 
 if ini is not None:
@@ -452,7 +483,7 @@ class ActionModule(ActionBase):
         merged_resultant = self._patch(args, original_resultant)
 
         out = StringIO()
-        yaml.dump(merged_resultant, out)
+        yaml.dump(_strip_ansible_tags(merged_resultant), out)
         resultant = out.getvalue()
         if not args.strip_comments:
             # restore document start marker
@@ -589,7 +620,14 @@ class ActionModule(ActionBase):
         try:
             with open(args.source, "rb") as f:
                 try:
-                    template_data = to_text(f.read(), errors="surrogate_or_strict")
+                    # Mark the template data as trusted so that ansible-core 2.20+
+                    # actually renders Jinja variables ({{ var }}).
+                    # Without this, the ansible-core templating engine's trust check
+                    # (< 2.19) treats externally-sourced template contents as
+                    # untrusted and returns them unrendered.
+                    template_data = trust_as_template(
+                        to_text(f.read(), errors="surrogate_or_strict")
+                    )
                 except UnicodeError as ex:
                     raise AnsibleActionFail(
                         "Template source files must be utf-8 encoded"
